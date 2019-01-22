@@ -1,0 +1,623 @@
+---
+title: 'Homework #2'
+author: "Mike Atwell"
+date: "`r Sys.Date()`"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r}
+library(caret)
+```
+
+# Data Import and Initial Look
+
+```{r import and look at data}
+crash_data_raw <- read.csv("crash.csv", stringsAsFactors = FALSE) #imports the data
+dim(crash_data_raw) #next five lines tell us some preliminary info about the data
+head(crash_data_raw) 
+summary(crash_data_raw)
+sapply(crash_data_raw, class)
+lapply(crash_data_raw, is.numeric)
+```
+
+# Exploratory Data Analysis  
+
+**Numeric columns:**  
+
+$Fatalities.in.crash [4]  
+$Age[6]  
+$Alcohol.Results [7]  
+$Crash.Date.year [13]  
+$Crash.Date.month [14]  
+$Crash.Date.day.of.month [15]  
+$Crash.Date.day.of.week [16]  
+
+**Non-numeric columns:**
+
+$State [1]  
+$Atmospheric.Condition [2]  
+$Crash.Date [3]  
+$Roadway [5]  
+$Person.Type [8]  
+$Drug.Involvement [9]  
+$Race [10]  
+$Gender [11]  
+$Injury.Severity [12]  
+
+### Intial analysis of each column:
+
+**$Fatalities.in.crash [4]**
+
+  Looks good. No blanks, all values 1 to 5, i.e. nothing unrealistic. Possible analysis: do any other variables influence number of fatalities?
+
+**$Age[6]**
+
+  70 NA's, otherwise looks good. No unrealisitic ages, few drivers below 16. Possible analysis: how does age impact accidents?
+
+**$Alcohol.Results [7]**
+
+  Lot's of NA's here (about half the data set). NA = 0 is probably a good value. Possible analysis: correlation of alcohol with accidents.
+
+**$Crash.Date.year [13]**
+
+  All 2011, this column can be safely ignored in any analysis.
+
+**$Crash.Date.month [14]**
+
+  No NA's, but data is heavily biased towards the start of the year (three quarters of the data in the 1st three months). Incomplete data willpreclude making seasonal comparisons.  
+
+**$Crash.Date.day.of.month [15]**
+
+  No NA's, values all 1-31. Probably not relevant.
+
+**$Crash.Date.day.of.week [16]**
+
+  No NA's, values all 1-7. Might be relevant (e.g. possibly more alcohol on weekends).
+
+**$State [1]**
+
+```{r}
+unique(crash_data_raw$State)
+```
+
+  All states and DC listed. Looks good, no N/A's. Possibly correlates with accidents, do regions differ?
+
+**$Atmospheric.Condition [2]**
+
+```{r}
+unique(crash_data_raw$Atmospheric.Condition)
+```
+
+  No NA's but there is three answers that provide no real info: "Not Reported," "Unknown," "Other."  Possible analysis: how weather impacts crashes. 
+
+**$Crash.Date [3]**
+
+  All this column does is repeat what's already in the month/day/year columns.
+
+**$Roadway [5]**
+
+```{r}
+unique(crash_data_raw$Roadway)
+```
+
+  No blanks, but two columns without info: "\\N" and "Unknown". Possible analysis: rural versus urban impact on accidents.
+
+**$Person.Type [8]**
+
+```{r}
+unique(crash_data_raw$Person.Type)
+```
+
+  No apparent issues here, but unclear how people other than drivers are relevant to the analysis.  
+
+**$Drug.Involvement [9]**
+
+```{r}
+unique(crash_data_raw$Drug.Involvement)
+```
+
+  Three answers with no info: "Not Reported," "Unknown," "\\N".
+
+**$Race [10]**
+
+```{r}
+unique(crash_data_raw$Race)
+```
+
+  Three answers without info: "", "Unknown", "\\N."  Probably illegal to use race as a factor auto in insurance decisions. 
+
+**$Gender [11]**
+
+```{r}
+unique(crash_data_raw$Gender)
+```
+
+  "Unknown" and "Not Reported" answers in addition to Male and Female.  Possible analysis: difference un accidents by gender.
+
+**$Injury.Severity [12]**
+
+```{r}
+unique(crash_data_raw$Injury.Severity)
+```
+
+  Has "Unknown" answers. Not sure if relevant.
+
+### Cleaning and preparing the Data
+
+Intial steps to impact all analysis:
+
+```{r initial scrub}
+
+crash_initial_scrub <- as.data.frame((crash_data_raw), stringsAsFactors=FALSE) #new data frame to modify ao raw data is preserved
+crash_initial_scrub <- within(crash_initial_scrub, rm("Race", "Crash.Date", "Crash.Date.year")) #deletes race, date, and year from the data set
+crash_initial_scrub$Alcohol.Results[is.na(crash_initial_scrub$Alcohol.Results)] <- 0 # puts 0 for NA in "Alcohol.Results" -- reasonable assumption
+
+## next 4 lines change Drug.Involvement to a binary 'yes' or 'no or unknown'
+crash_initial_scrub$Drug.Involvement[crash_initial_scrub$Drug.Involvement %in% "Not Reported"] <- "No or Unknown" 
+crash_initial_scrub$Drug.Involvement[crash_initial_scrub$Drug.Involvement %in% "Unknown"] <- "No or Unknown" 
+crash_initial_scrub$Drug.Involvement[crash_initial_scrub$Drug.Involvement %in% "No"] <- "No or Unknown" 
+crash_initial_scrub$Drug.Involvement[4270] <- "No or Unknown" #changes a single instance of /N to 'no or unknown'
+
+crash_initial_scrub$Region <- NA #these 5 lines create a region column and popuate it with one of the for regions based on $State
+crash_initial_scrub$Region[crash_initial_scrub$State %in% c("Connecticut", "Maine", "Massachusetts", "New Hampshire", "Rhode Island", "Vermont", "New Jersey", "New York", "Pennsylvania")] <- "Northeast"
+crash_initial_scrub$Region[crash_initial_scrub$State %in% c("Delaware", "Florida", "Georgia", "Maryland", "North Carolina", "South Carolina", "Virginia", "District of Columbia", "West Virginia", "Alabama", "Kentucky", "Mississippi", "Tennessee", "Arkansas", "Louisiana", "Oklahoma", "Texas")] <- "South"
+crash_initial_scrub$Region[crash_initial_scrub$State %in% c("Arizona", "Colorado", "Idaho", "Montana", "Nevada", "New Mexico", "Utah", "Wyoming", "Alaska", "California", "Hawaii", "Oregon", "Washington")] <- "West"
+crash_initial_scrub$Region[crash_initial_scrub$State %in% c("Illinois", "Indiana", "Michigan", "Ohio", "Wisconsin", "Iowa", "Kansas", "Minnesota", "Missouri", "Nebraska", "North Dakota", "South Dakota")] <- "Midwest"
+
+crash_drivers_only <- crash_initial_scrub[which(crash_initial_scrub$Person.Type=='Driver of a Motor Vehicle In-Transport'),] # creates data of drivers only, as this is most relevant to analysis (we're in the auto insurance business)
+
+```
+
+### Analysis
+
+First, we'll look at age, and analyze the number or accidents and the age of the driver versus alcohol or drugs.  Ages more likely to use alcohol or drugs when driving could presumably be charged higher rates.
+
+```{r age}
+age_count <- (table(crash_drivers_only$Age))
+print(age_count)
+plot(age_count)
+age_percent <- 100 * age_count/nrow(crash_drivers_only)
+print(age_percent)
+
+
+age_alcohol <- lm(crash_drivers_only$Alcohol.Results~crash_drivers_only$Age) #linear model of age vs alcohol results
+summary(age_alcohol) #summary of linear model results
+plot(crash_drivers_only$Age, crash_drivers_only$Alcohol.Results) #plots model results
+abline(age_alcohol)
+
+age_drugs <- lm(crash_drivers_only$Age~crash_drivers_only$Drug.Involvement) #linear model of age versus drug use
+summary(age_drugs) #summary of linear model results
+```
+
+In both cases I analyzed age versus drug or alcohol use with a linear model.  For both alcohol and drugs, younger drivers involved in fatal accidents are more likely to have used alcohol or drugs while driving.  The p-values for both showed high statistical significance, but the R-squared values for both were low.  A plot of alcohol versus age showing the correlation is less intuitive presumably due to the large number of zeros in the data.  But, the correlation is there and the case can be made for charging younger drivers more.  Additionally, the company could consider offering a discount to drivers who install breathalyzers in their cars -- used each time the car is driven, and the data shared with the insurance company.
+
+For age itself, the plot shows a higher number of fatal accidents for drivers in their late teens and early 20s.  But without knowing the breakdown of drivers on the road by age, I can't tell if this is significant.   
+
+Next I'll analyze the impact of alcohol or drugs on the number of fatalities, which may be an indicator of how severe a wreck is.
+
+```{r alcohol and drugs}
+
+fatalities_alcohol <- lm(crash_drivers_only$Alcohol.Results~crash_drivers_only$Fatalities.in.crash) #linear model of number of fatalities versus alcohol
+summary(fatalities_alcohol) #summary of model
+
+fatalities_drugs <- lm(crash_drivers_only$Fatalities.in.crash~crash_drivers_only$Drug.Involvement) #linear model of number of fatalities versus drugs
+summary(fatalities_drugs) #summary of model
+```
+
+The presence of alcohol or drugs appears to have no impact of statistical significance on the number of fatalties in a particular wreck.  The accident rate would likley be a more useful number but it's not in this dataset.
+
+Next I'll look at day of the week for overall count and versus alcohol and drugs.  
+
+```{r weekday}
+
+weekday_count <- (table(crash_drivers_only$Crash.Date.day.of.week))
+print(weekday_count)
+plot(weekday_count)
+
+weekday_alcohol <- lm(crash_drivers_only$Alcohol.Results~crash_drivers_only$Crash.Date.day.of.week) #linear model of day of week versus alcohol
+summary(weekday_alcohol) #summary of model
+plot(crash_drivers_only$Crash.Date.day.of.week, crash_drivers_only$Alcohol.Results) #plot of model
+abline(weekday_alcohol)
+
+
+weekday_drugs <- lm(crash_drivers_only$Crash.Date.day.of.week~crash_drivers_only$Drug.Involvement) #linear model of day of week versus drugs
+summary(weekday_drugs) #summary of model
+```
+
+There are more fatal accidents on Saturday than any other day of the week.  
+
+Day of the week appears to have no significant impact on drugs, but for alcohol, the later in the week, the higher the alcohol -- no surprise there.  Perhaps drivers who drive less on weekends could be given lower insurance rates?  The data could be self reported (after all, you typically enter how many miles you drive a year when getting a quote, and the company is relying on your honesty) or offer discounts to those who allow trackers on their cars to verify less use on weekends.
+
+Now let's look at gender.
+
+```{r gender}
+# next 4 rows determine how many of each gender
+gender_count <- (table(crash_drivers_only$Gender))
+print(gender_count)
+gender_percent <- 100 * gender_count/nrow(crash_drivers_only)
+print(gender_percent)
+
+gender_drugs_count <- table(crash_drivers_only$Gender,crash_drivers_only$Drug.Involvement) ## confusion matrix of gender versus drugs
+gender_drugs_count <- gender_drugs_count[1:2,] #deletes 'not reported' and 'unknown' rows
+gender_drugs_percent <- gender_drugs_count
+gender_drugs_percent[1,] <- 100 * gender_drugs_percent[1,]/gender_count[1] #divides females with drugs by total count of females to get percent
+gender_drugs_percent[2,] <- 100 * gender_drugs_percent[2,]/gender_count[2] #divides males with drugs by total count of males to get percent
+print(gender_drugs_percent)
+summary(gender_drugs_count)
+
+gender_alcohol <- lm(crash_drivers_only$Alcohol.Results~crash_drivers_only$Gender) #linear model of gender versus alcohol
+summary(gender_alcohol) #summary of model
+
+gender_fatal <- lm(crash_drivers_only$Fatalities.in.crash~crash_drivers_only$Gender) #linear model of gender versus number of fatalities
+summary(gender_fatal) #summary of model
+```
+
+From this analysis, I infer the following about gender:
+
+- Of those fatal accidents where gender is identified, males account for roughly 2.67 times as many of them.
+
+- There appears to be little difference between genders for drug use.
+
+- There appears to be no correlation between number of fatalties and gender.
+
+- Being male and alcohol percent have a statistically significant positive corellation, so men are more likely to have higher alcohol.   
+
+From this data, the company could justify charging higher rates for men, due to higher number of fatal accidents and higher drinking and driving.  What it doesn't show is if men drive more than women overall.  If true, that may account for some of the difference in overall involvement as drivers in fatal accidents.
+
+Now we'll look at the impact of weather conditions.
+
+```{r weather}
+weather_fatal <- lm(crash_drivers_only$Fatalities.in.crash~crash_drivers_only$Atmospheric.Condition) #linear model of atmospheric conditions versus fatalities
+summary(weather_fatal) #summary of model
+```
+
+Atmoshperic conditions appear to have no statistically significant impact on the number of fatalities in an accident.
+
+If we had a complete data set of all crashes, we could presumably analyze seasonal variations in accident rates comapred to the weather reported.  But, since this dataset is heavily biased towards the first three months of the year, I see no way to meaningfully analyze it for this.
+
+Another weakness of the dataset is there's no information about fault -- obviously important when determining insurance risk.
+
+Regional analysis
+
+```{r region}
+regional_alcohol <- lm(crash_drivers_only$Alcohol.Results~crash_drivers_only$Region) #linear model of region versus alcohol
+summary(regional_alcohol)
+
+regional_fatal <- lm(crash_drivers_only$Fatalities.in.crash~crash_drivers_only$Region) #linar model of region versus number of fatalities
+summary(regional_fatal)
+
+# next four rows are countby region
+region_count <- (table(crash_drivers_only$Region))
+print(region_count)
+region_percent <- 100 * region_count/nrow(crash_drivers_only)
+print(region_percent)
+
+gender_regional_count <- table(crash_drivers_only$Gender,crash_drivers_only$Region) ## table of gender versus region
+print(gender_regional_count)
+gender_regional_percent <- gender_regional_count
+gender_regional_percent[,1] <- 100 * gender_regional_percent[,1]/region_count[1] #divides gender within a region by total count of region to get percent
+gender_regional_percent[,2] <- 100 * gender_regional_percent[,2]/region_count[2] #divides gender within a region by total count of region to get percent
+gender_regional_percent[,3] <- 100 * gender_regional_percent[,3]/region_count[3] #divides gender within a region by total count of region to get percent
+gender_regional_percent[,4] <- 100 * gender_regional_percent[,4]/region_count[4] #divides gender within a region by total count in region to get percent
+print(gender_regional_percent)
+summary(gender_regional_percent)
+
+drugs_region <- table(crash_drivers_only$Drug.Involvement,crash_drivers_only$Region) #compares drugs by region
+print(drugs_region)
+drugs_regional_percent <- drugs_region
+drugs_regional_percent[,1] <- 100 * drugs_regional_percent[,1]/region_count[1] #divides drugs within a region by total count of region to get percent
+drugs_regional_percent[,2] <- 100 * drugs_regional_percent[,2]/region_count[2] #divides drugs within a region by total count of region to get percent
+drugs_regional_percent[,3] <- 100 * drugs_regional_percent[,3]/region_count[3] #divides drugs within a region by total count of region to get percent
+drugs_regional_percent[,4] <- 100 * drugs_regional_percent[,4]/region_count[4] #divides drugs within a region by total count in region to get percent
+print(drugs_regional_percent)
+summary(drugs_regional_percent)
+
+weather_region <- table(crash_drivers_only$Atmospheric.Condition,crash_drivers_only$Region) #compares atmospheric conditions by region
+print(weather_region)
+weather_regional_percent <- weather_region
+weather_regional_percent[,1] <- 100 * weather_regional_percent[,1]/region_count[1] #divides weather within a region by total count of region to get percent
+weather_regional_percent[,2] <- 100 * weather_regional_percent[,2]/region_count[2] #divides weather within a region by total count of region to get percent
+weather_regional_percent[,3] <- 100 * weather_regional_percent[,3]/region_count[3] #divides weather within a region by total count of region to get percent
+weather_regional_percent[,4] <- 100 * weather_regional_percent[,4]/region_count[4] #divides weather within a region by total count in region to get percent
+print(weather_regional_percent)
+summary(weather_regional_percent)
+```
+
+I conclude the following for region:
+
+- No statistically significant correlation between region and alcohol levels in fatal accidents.
+
+- The northeast is the only region with a statistically significant difference in number of fatalities per crash (slightly less), otherwise no correlation.
+
+- Percentage of drivers in fatal accidents by gender appear to have no statistically significant correlation with gender; the midwest had a slightly higher precentage of male drivers.
+
+- Drugs by region don't appear to be statistically significant, though the Midwest was a good deal lower than the other three regions.
+
+- Comparing weather conditions across the four regions, the Midwest had more fatal accidents in snow and cloudy conditions and less in rain or clear conditions compared to the other regions.  The northeast also stood out as having more snow than the south or west.
+
+# Cluster Analysis
+
+### R Packages  
+
+```{r packages}
+library(cluster)
+library(fpc)
+library(klaR)
+library(clustMixType)
+library(dplyr)
+```
+
+### Numeric prepping of the data
+
+```{r numeric}
+crash_drivers_numeric <- crash_drivers_only
+crash_drivers_numeric <- within(crash_drivers_numeric, rm("State", "Atmospheric.Condition", "Roadway", "Person.Type", "Injury.Severity", "Crash.Date.month", "Crash.Date.day.of.month")) #deletes remaining columns not used in cluster analysis
+crash_drivers_numeric$Drug.Involvement <- as.numeric(crash_drivers_numeric$Drug.Involvement == 'Yes') #makes drugs a number
+crash_drivers_numeric <- crash_drivers_numeric[ ! crash_drivers_numeric$Gender %in% c("Unknown","Not Reported"), ] #deletes unknown genders
+crash_drivers_numeric$Gender <- as.numeric(crash_drivers_numeric$Gender == 'Male') #makes gender a number
+
+#this section was an experiment to see impact of region on clustering.  In the end the clusters were largely sorting by region and I decided this was obcuring the analysis, so I voided this section out, but kept the code in case it needs to be used again.
+# next 8 rows create a numerical 'yes/no' (i.e. 1/0) for each region. I felt this would be more accurate than using a 0/1/2/3 dummy variable for region since 0 and 3 would be "further away" from each other than 1 and 2.
+# crash_drivers_numeric$Northeast <- 0
+# crash_drivers_numeric$Midwest <- 0
+# crash_drivers_numeric$South <- 0
+# crash_drivers_numeric$West <- 0
+# crash_drivers_numeric$Northeast[crash_drivers_numeric$Region == "Northeast"] = 1 
+# crash_drivers_numeric$Midwest[crash_drivers_numeric$Region == "Midwest"] = 1 
+# crash_drivers_numeric$South[crash_drivers_numeric$Region == "South"] = 1 
+# crash_drivers_numeric$West[crash_drivers_numeric$Region == "West"] = 1
+
+crash_drivers_numeric <- within(crash_drivers_numeric, rm("Region")) #deletes region (verbal) column
+crash_drivers_numeric <- na.omit(crash_drivers_numeric) # deletes rows with blanks
+crash_drivers_numeric_z <- scale(crash_drivers_numeric) # scales with z score
+summary(crash_drivers_numeric_z)
+```
+
+### K Means clustering
+
+```{r kmeans}
+
+set.seed(123)
+
+#Elbow Method
+wss <- (nrow(crash_drivers_numeric_z)-1)*sum(apply(crash_drivers_numeric_z,2,var))
+for (i in 2:10) wss[i] <- sum(kmeans(crash_drivers_numeric_z,                                  centers=i)$withinss)
+plot(1:10, wss, type="b", xlab="Number of Clusters", ylab="Within Sum of Squares", main = "Number of Clusters (k) versus Cluster Cohesiveness")
+
+set.seed(123)
+crash_kmeans_clusters <- kmeans(crash_drivers_numeric_z, centers=3) # conducts kmeans clustering, 3 was the final number of clusters I used for reasons explained below, but I tested from 2 to 7 clusters.
+
+plotcluster(crash_drivers_numeric_z, crash_kmeans_clusters$cluster)  #plot
+
+#tie each observation to its cluster assignment
+crash_drivers_numeric$cluster_kmeans <- crash_kmeans_clusters$cluster #records cluster assignment in each row
+
+profiles_kmeans <- aggregate(crash_drivers_numeric, by=list(crash_drivers_numeric$cluster_kmeans), FUN=mean) #find mean for each numeric variable 
+print(profiles_kmeans)
+```
+
+The Elbow method reveals a k=7 per the graph, but I tested k=2 through k=7 to see how the clusters looked and what their applicability was.
+
+K=2
+
+1 is more alcohol, more drugs, more male, younger, later in the week
+
+k=3 (final answer, most intuitive)
+
+1 is younger, LOTS more alcohol and drugs, more male, later in week  
+2 is all female, low drugs and alcohol, middle of week  
+3 is all male, low drugs and alcohol, middle of week  
+
+k=4
+
+1 is younger, LOTS more alcohol and drugs, more male, middle of week   
+2 is all female, low drugs and alcohol, middle of week  
+3 is all male, low drugs and alcohol, late in week  
+4 is virtually all male, low alcohol, higher drugs, early in week  
+
+k=5
+
+1 is younger, LOTS more alcohol and drugs, more male, later in week  
+2 is female  
+3 is younger, lower risk men  
+4 is high fatalities  
+5 is older men
+
+k=6
+
+1 is younger, LOTS more alcohol and drugs, more male  
+2 is female  
+3 is younger, low risk men, later in week  
+4 is high fatalities  
+5 is younger, low risk men, early in week  
+6 is older, low risk men
+
+k=7
+
+1 is the drug users  
+2 is low risk female  
+3 is young, low risk male, late in week  
+4 is high fatality  
+5 is low risk men, early in the week  
+6 is older, low risk men  
+7 is high alcohol
+
+I chose k=3 because I felt it was simpler to understand and provided the best breakout of the higher risk users (cluster 1).  k=7 had cluster breakouts that don't seem as relevant, for instance low risk men are divided up into early and later parts of the week.
+
+### Hierarchical clustering
+
+First we'll create a distance matrix:
+
+```{r dismatrix}
+dis.matrix<-dist(crash_drivers_numeric_z) #create a matrix with Euclidean distances for all observations
+
+dis.matrix_view<-as.matrix(dis.matrix) #convert the above into a matrix object
+```
+
+Now we'll create a hiearchical cluster using the following different methods:
+
+```{r hclust.complete}
+set.seed(123)
+crash_hiearchical_clusters_complete <- hclust(dis.matrix, method="complete") # Hierarchical clustering with 'complete' method
+
+plot(crash_hiearchical_clusters_complete, main = "Dendrogram: Complete Linkage", hang=-1, ann=FALSE)
+```
+
+
+```{r hclust.single}
+set.seed(123)
+crash_hiearchical_clusters_single <- hclust(dis.matrix, method="single") # Hierarchical clustering with 'single' method
+
+plot(crash_hiearchical_clusters_single, main = "Dendrogram: Single Linkage", hang=-1, ann=FALSE)
+```
+
+
+```{r hclust.average}
+set.seed(123)
+crash_hiearchical_clusters_average <- hclust(dis.matrix, method="average") # Hierarchical clustering with 'average' method
+
+plot(crash_hiearchical_clusters_average, main = "Dendrogram: Average Linkage", hang=-1, ann=FALSE)
+```
+
+
+```{r hclust.centroid}
+set.seed(123)
+crash_hiearchical_clusters_centroid <- hclust(dis.matrix, method="centroid") # Hierarchical clustering with 'centroid' method
+
+plot(crash_hiearchical_clusters_centroid, main = "Dendrogram: Centroid Linkage", hang=-1, ann=FALSE)
+```
+
+
+```{r hclust.ward}
+set.seed(123)
+crash_hiearchical_clusters_ward <- hclust(dis.matrix, method="ward.D2") # Hierarchical clustering with 'ward' method
+
+plot(crash_hiearchical_clusters_ward, main = "Dendrogram: Ward's Method", hang=-1, ann=FALSE)
+```
+
+All of these produce far too detailed a dendogram to make sense of.  So I cut the ward tree using 2, 3, 4, 5, 6, and 7 clusters to see what the clusters were.
+
+```{r cutdendrogram.7}
+set.seed(123)
+crash_hiearchical_clusters_ward <- hclust(dis.matrix, method="ward.D2") 
+
+plot(crash_hiearchical_clusters_ward, main = "Dendrogram: Seven Clusters", hang=-1, ann=FALSE)
+rect.hclust(crash_hiearchical_clusters_ward, k=7, border="red")
+
+crash_drivers_numeric$cluster_dendo_7cut <- cutree(crash_hiearchical_clusters_ward, k = 7)
+profiles_dendo_7cut <- aggregate(crash_drivers_numeric[,1:6], by=list(crash_drivers_numeric$cluster_dendo_7cut), FUN=mean) 
+print(profiles_dendo_7cut)
+```
+
+k = 7
+
+1 - drugs  
+2 - low risk women  
+3 - low risk young men, late in week  
+4 - low risk old men, late in week  
+5 - high alcohol  
+6 - multiple fatalities  
+7 - low risk men, early in week
+
+```{r cutdendrogram.6}
+set.seed(123)
+crash_hiearchical_clusters_ward <- hclust(dis.matrix, method="ward.D2") 
+
+plot(crash_hiearchical_clusters_ward, main = "Dendrogram: Six Clusters", hang=-1, ann=FALSE)
+rect.hclust(crash_hiearchical_clusters_ward, k=6, border="red")
+
+crash_drivers_numeric$cluster_dendo_6cut <- cutree(crash_hiearchical_clusters_ward, k = 6)
+profiles_dendo_6cut <- aggregate(crash_drivers_numeric[,1:6], by=list(crash_drivers_numeric$cluster_dendo_6cut), FUN=mean) 
+print(profiles_dendo_6cut)
+```
+
+k = 6
+
+1 - drugs  
+2 - low risk women  
+3 - low risk men, late in week  
+4 - high alcohol  
+5 - multiple fatalities  
+6 - low risk men, early in week  
+
+```{r cutdendrogram.5}
+set.seed(123)
+crash_hiearchical_clusters_ward <- hclust(dis.matrix, method="ward.D2") 
+
+plot(crash_hiearchical_clusters_ward, main = "Dendrogram: Five Clusters", hang=-1, ann=FALSE)
+rect.hclust(crash_hiearchical_clusters_ward, k=5, border="red")
+
+crash_drivers_numeric$cluster_dendo_5cut <- cutree(crash_hiearchical_clusters_ward, k = 5)
+profiles_dendo_5cut <- aggregate(crash_drivers_numeric[,1:6], by=list(crash_drivers_numeric$cluster_dendo_5cut), FUN=mean) 
+print(profiles_dendo_5cut)
+```
+
+k = 5
+
+1 - drugs  
+2 - safe women  
+3 - safe men  
+4 - high alcohol  
+5 - multiple fatalities  
+
+```{r cutdendrogram.4}
+set.seed(123)
+crash_hiearchical_clusters_ward <- hclust(dis.matrix, method="ward.D2") 
+
+plot(crash_hiearchical_clusters_ward, main = "Dendrogram: Four Clusters", hang=-1, ann=FALSE)
+rect.hclust(crash_hiearchical_clusters_ward, k=4, border="red")
+
+crash_drivers_numeric$cluster_dendo_4cut <- cutree(crash_hiearchical_clusters_ward, k = 4)
+profiles_dendo_4cut <- aggregate(crash_drivers_numeric[,1:6], by=list(crash_drivers_numeric$cluster_dendo_4cut), FUN=mean) 
+print(profiles_dendo_4cut)
+```
+
+k = 4
+
+1 - drugs  
+2 - safe women  
+3 - safe men, slightly higher alcohol  
+4 - high fatalities
+
+
+```{r cutdendrogram.3}
+set.seed(123)
+crash_hiearchical_clusters_ward <- hclust(dis.matrix, method="ward.D2") 
+
+plot(crash_hiearchical_clusters_ward, main = "Dendrogram: Three Clusters", hang=-1, ann=FALSE)
+rect.hclust(crash_hiearchical_clusters_ward, k=3, border="red")
+
+crash_drivers_numeric$cluster_dendo_3cut <- cutree(crash_hiearchical_clusters_ward, k = 3)
+profiles_dendo_3cut <- aggregate(crash_drivers_numeric[,1:6], by=list(crash_drivers_numeric$cluster_dendo_3cut), FUN=mean) 
+print(profiles_dendo_3cut)
+```
+
+K=3
+
+1 - drugs  
+2 - normal  
+3 - high fatality
+
+```{r cutdendrogram.2}
+set.seed(123)
+crash_hiearchical_clusters_ward <- hclust(dis.matrix, method="ward.D2") 
+
+plot(crash_hiearchical_clusters_ward, main = "Dendrogram: Two Clusters", hang=-1, ann=FALSE)
+rect.hclust(crash_hiearchical_clusters_ward, k=2, border="red")
+
+crash_drivers_numeric$cluster_dendo_2cut <- cutree(crash_hiearchical_clusters_ward, k = 2)
+profiles_dendo_2cut <- aggregate(crash_drivers_numeric[,1:6], by=list(crash_drivers_numeric$cluster_dendo_2cut), FUN=mean) 
+print(profiles_dendo_2cut)
+
+```
+
+k = 2
+
+1 - drugs  
+2 - no drugs
+
+### Choosing an Answer
+
+For intiutive usefuleness, I perfer k=5; it breaks out high alcohol and drug use without further breakdowns such as early/late in week.

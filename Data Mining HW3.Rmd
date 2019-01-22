@@ -1,0 +1,854 @@
+---
+title: 'Homework #3'
+author: "Mike Atwell"
+date: "`r Sys.Date()`"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r}
+options(knitr.duplicate.label = 'allow')
+library(caret)
+```
+
+### Data Import
+
+```{r import and look at data}
+crash_data_raw <- read.csv("crash.csv", stringsAsFactors = FALSE) #imports the data
+```
+
+### Cleaning and preparing the Data
+
+Intial steps to impact all analysis:
+
+```{r initial scrub}
+
+crash_initial_scrub <- as.data.frame((crash_data_raw), stringsAsFactors=FALSE) #new data frame to modify so raw data is preserved
+crash_initial_scrub <- within(crash_initial_scrub, rm("Race", "Crash.Date", "Crash.Date.year")) #deletes race, date, and year from the data set
+crash_initial_scrub$Alcohol.Results[is.na(crash_initial_scrub$Alcohol.Results)] <- 0 # puts 0 for NA in "Alcohol.Results" -- reasonable assumption
+
+## next 4 lines change Drug.Involvement to a binary 'yes' or 'no or unknown'
+crash_initial_scrub$Drug.Involvement[crash_initial_scrub$Drug.Involvement %in% "Not Reported"] <- "No or Unknown" 
+crash_initial_scrub$Drug.Involvement[crash_initial_scrub$Drug.Involvement %in% "Unknown"] <- "No or Unknown" 
+crash_initial_scrub$Drug.Involvement[crash_initial_scrub$Drug.Involvement %in% "No"] <- "No or Unknown" 
+crash_initial_scrub$Drug.Involvement[4270] <- "No or Unknown" #changes a single instance of /N to 'no or unknown'
+
+crash_initial_scrub$Region <- NA #these 5 lines create a region column and popuate it with one of the for regions based on $State
+crash_initial_scrub$Region[crash_initial_scrub$State %in% c("Connecticut", "Maine", "Massachusetts", "New Hampshire", "Rhode Island", "Vermont", "New Jersey", "New York", "Pennsylvania")] <- "Northeast"
+crash_initial_scrub$Region[crash_initial_scrub$State %in% c("Delaware", "Florida", "Georgia", "Maryland", "North Carolina", "South Carolina", "Virginia", "District of Columbia", "West Virginia", "Alabama", "Kentucky", "Mississippi", "Tennessee", "Arkansas", "Louisiana", "Oklahoma", "Texas")] <- "South"
+crash_initial_scrub$Region[crash_initial_scrub$State %in% c("Arizona", "Colorado", "Idaho", "Montana", "Nevada", "New Mexico", "Utah", "Wyoming", "Alaska", "California", "Hawaii", "Oregon", "Washington")] <- "West"
+crash_initial_scrub$Region[crash_initial_scrub$State %in% c("Illinois", "Indiana", "Michigan", "Ohio", "Wisconsin", "Iowa", "Kansas", "Minnesota", "Missouri", "Nebraska", "North Dakota", "South Dakota")] <- "Midwest"
+
+crash_drivers_only <- crash_initial_scrub[which(crash_initial_scrub$Person.Type=='Driver of a Motor Vehicle In-Transport'),] # creates data of drivers only, as this is most relevant to analysis (we're in the auto insurance business)
+```
+
+### R loading
+
+```{r}
+library(cluster)
+library(fpc)
+library(klaR)
+library(clustMixType)
+library(dplyr)
+```
+
+### Numeric prepping of the data
+
+```{r numeric}
+crash_drivers_numeric <- crash_drivers_only
+crash_drivers_numeric <- within(crash_drivers_numeric, rm("State", "Atmospheric.Condition", "Roadway", "Person.Type", "Injury.Severity", "Crash.Date.month", "Crash.Date.day.of.month")) #deletes remaining columns not used in cluster analysis
+crash_drivers_numeric$Drug.Involvement <- as.numeric(crash_drivers_numeric$Drug.Involvement == 'Yes') #makes drugs a number
+crash_drivers_numeric <- crash_drivers_numeric[ ! crash_drivers_numeric$Gender %in% c("Unknown","Not Reported"), ] #deletes unknown genders
+crash_drivers_numeric$Gender <- as.numeric(crash_drivers_numeric$Gender == 'Male') #makes gender a number
+
+#this section was an experiment to see impact of region on clustering.  In the end the clusters were largely sorting by region and I decided this was obcuring the analysis, so I voided this section out, but kept the code in case it needs to be used again.
+# next 8 rows create a numerical 'yes/no' (i.e. 1/0) for each region. I felt this would be more accurate than using a 0/1/2/3 dummy variable for region since 0 and 3 would be "further away" from each other than 1 and 2.
+# crash_drivers_numeric$Northeast <- 0
+# crash_drivers_numeric$Midwest <- 0
+# crash_drivers_numeric$South <- 0
+# crash_drivers_numeric$West <- 0
+# crash_drivers_numeric$Northeast[crash_drivers_numeric$Region == "Northeast"] = 1 
+# crash_drivers_numeric$Midwest[crash_drivers_numeric$Region == "Midwest"] = 1 
+# crash_drivers_numeric$South[crash_drivers_numeric$Region == "South"] = 1 
+# crash_drivers_numeric$West[crash_drivers_numeric$Region == "West"] = 1
+
+crash_drivers_numeric <- within(crash_drivers_numeric, rm("Region")) #deletes region (verbal) column
+crash_drivers_numeric <- na.omit(crash_drivers_numeric) # deletes rows with blanks
+crash_drivers_numeric_z <- scale(crash_drivers_numeric) # scales with z score
+summary(crash_drivers_numeric_z)
+```
+
+# Analysis for Association Rules (Homework 3 Part A)
+
+```{r}
+library(Matrix)
+library(arules)
+library(arulesViz)
+```
+
+### Reformat to categorical variables
+
+```{r discretize}
+
+crash_drivers_only_cat <- within(crash_drivers_only, rm("State", "Person.Type", "Crash.Date.month", "Crash.Date.day.of.month")) #deletes state, person type (since they're all drivers), month, and day
+crash_drivers_only_cat$Fatalities.in.crash <- factor(ifelse(crash_drivers_only_cat$Fatalities.in.crash >1, "Multiple", "Single"))
+crash_drivers_only_cat <- crash_drivers_only_cat[!(crash_drivers_only_cat$Gender =="Unknown"),]
+crash_drivers_only_cat <- crash_drivers_only_cat[!(crash_drivers_only_cat$Gender=="Not Reported"),]
+crash_drivers_only_cat <- na.omit(crash_drivers_only_cat) #removes remaining rows with NA values
+crash_drivers_only_cat$Alcohol.Results <- factor(ifelse(crash_drivers_only_cat$Alcohol.Results ==0, "Sober", ifelse(crash_drivers_only_cat$Alcohol.Results <0.08, "Buzzed", ifelse(crash_drivers_only_cat$Alcohol.Results < .16, "Tipsy", ifelse(crash_drivers_only_cat$Alcohol.Results <.24 , "Drunk",  ifelse(crash_drivers_only_cat$Alcohol.Results <.32 , "Hammered", "Unconscious"))))))
+crash_drivers_only_cat$Age <- factor(ifelse(crash_drivers_only_cat$Age <26, "Young", ifelse(crash_drivers_only_cat$Age <41, "Prime", ifelse(crash_drivers_only_cat$Age < 56, "Middle Age", ifelse(crash_drivers_only_cat$Age <71 , "Older",  "Elderly")))))
+crash_drivers_only_cat$Crash.Date.day.of.week <- factor(ifelse(crash_drivers_only_cat$Crash.Date.day.of.week == 1, "Monday", ifelse(crash_drivers_only_cat$Crash.Date.day.of.week == 2, "Tuesday", ifelse(crash_drivers_only_cat$Crash.Date.day.of.week == 3, "Wednesday", ifelse(crash_drivers_only_cat$Crash.Date.day.of.week == 4, "Thursday",  ifelse(crash_drivers_only_cat$Crash.Date.day.of.week == 5, "Friday", ifelse(crash_drivers_only_cat$Crash.Date.day.of.week == 6, "Saturday","Sunday")))))))
+crash_drivers_only_cat$Atmospheric.Condition <- factor(crash_drivers_only_cat$Atmospheric.Condition)
+
+crash_drivers_only_cat$Drug.Involvement <- factor(crash_drivers_only_cat$Drug.Involvement)
+crash_drivers_only_cat$Gender <- factor(crash_drivers_only_cat$Gender)
+crash_drivers_only_cat$Injury.Severity <- factor(crash_drivers_only_cat$Injury.Severity)
+crash_drivers_only_cat$Region <- factor(crash_drivers_only_cat$Region)
+
+crash_drivers_only_cat$Roadway_Type <- NA
+crash_drivers_only_cat$Roadway_Type[crash_drivers_only_cat$Roadway %in% c("Rural-Principal Arterial-Interstate", "Rural-Minor Arterial", "Rural-Local Road or Street", "Rural-Principal Arterial-Other", "Rural-Major Collector", "Rural-Minor Collector", "Rural-Unknown Rural")] <- "Rural"
+crash_drivers_only_cat$Roadway_Type[crash_drivers_only_cat$Roadway %in% c("Urban-Other Principal Arterial", "Urban-Local Road or Street", "Urban-Minor Arterial", "Urban-Principal Arterial-Other Freeways or Expressways", "Urban-Collector", "Urban-Principal Arterial-Interstate", "Urban-Unknown Urban ")] <- "Urban"
+crash_drivers_only_cat$Roadway_Type[is.na(crash_drivers_only_cat$Roadway_Type)] <- "Unknown"                
+crash_drivers_only_cat$Roadway_Type <- factor(crash_drivers_only_cat$Roadway_Type)                      
+crash_drivers_only_cat <- within(crash_drivers_only_cat, rm("Roadway"))                                 
+```
+
+
+## Apriori Algorithm
+
+
+### Using different parameter settings
+
+```{r}
+
+#Here we use the apriori algortihm using the default parameter settings
+crash_apriori_basic_rule <- apriori(crash_drivers_only_cat)
+crash_apriori_basic_rule <- sort(crash_apriori_basic_rule, by = "lift")
+summary(crash_apriori_basic_rule)
+inspect(crash_apriori_basic_rule[1:10])
+
+#Now we use the apriori algorithm using a series of different parameters (support, confidence, minimum length, maximum length) to look for insights  
+crash_apriori_tweaked <- apriori(crash_drivers_only_cat, parameter = list(support = 0.2, confidence = 0.95, minlen = 2)) 
+crash_apriori_tweaked <- crash_apriori_tweaked[!is.redundant(crash_apriori_tweaked)]
+crash_apriori_tweaked <- sort(crash_apriori_tweaked, by = "lift")
+summary(crash_apriori_tweaked)
+inspect(crash_apriori_tweaked[1:10])
+
+crash_apriori_tweaked <- apriori(crash_drivers_only_cat, parameter = list(support = 0.1, confidence = 0.8, minlen = 2, maxlen = 2)) 
+crash_apriori_tweaked <- sort(crash_apriori_tweaked, by = "lift")
+summary(crash_apriori_tweaked)
+inspect(crash_apriori_tweaked[1:10])
+
+crash_apriori_tweaked <- apriori(crash_drivers_only_cat, parameter = list(support = 0.01, confidence = 0.7, minlen = 2, maxlen = 2)) 
+crash_apriori_tweaked <- sort(crash_apriori_tweaked, by = "lift")
+summary(crash_apriori_tweaked)
+inspect(crash_apriori_tweaked[1:10])
+
+crash_apriori_tweaked <- apriori(crash_drivers_only_cat, parameter = list(support = 0.1, confidence = 0.8, minlen = 2, maxlen = 3)) 
+crash_apriori_tweaked <- sort(crash_apriori_tweaked, by = "lift")
+summary(crash_apriori_tweaked)
+inspect(crash_apriori_tweaked[1:10])
+
+crash_apriori_tweaked <- apriori(crash_drivers_only_cat, parameter = list(support = 0.01, confidence = 0.7, minlen = 2, maxlen = 3)) 
+crash_apriori_tweaked <- sort(crash_apriori_tweaked, by = "lift")
+summary(crash_apriori_tweaked)
+inspect(crash_apriori_tweaked[1:10])
+
+crash_apriori_tweaked <- apriori(crash_drivers_only_cat, parameter = list(support = 0.1, confidence = 0.8, minlen = 2, maxlen = 4)) 
+crash_apriori_tweaked <- sort(crash_apriori_tweaked, by = "lift")
+summary(crash_apriori_tweaked)
+inspect(crash_apriori_tweaked[1:10])
+
+crash_apriori_tweaked <- apriori(crash_drivers_only_cat, parameter = list(support = 0.01, confidence = 0.7, minlen = 2, maxlen = 4)) 
+crash_apriori_tweaked <- sort(crash_apriori_tweaked, by = "lift")
+summary(crash_apriori_tweaked)
+inspect(crash_apriori_tweaked[1:10])
+```
+
+Based on this analysis, we find:
+
+Basic
+
+- Sobriety correlates with no injury, single fatality crashes, no drugs, clear conditions
+
+Strict as possible, confidence 0.95, support 0.2 (28 rules)
+
+- Sobriety correlates with no drugs, no injury, single fatality crashes
+
+Length 2 only (65 rules)
+
+- Sobriety correlates with no injury, older, rural, Mon/Tues/Wends, Females
+- No injury correlates with single fatalities and no drugs
+
+Length 2 only, support - 0.01 (125 rules)
+
+- Sobriety correlates with elderly, no-possible-non-incapacitating injuries
+- Alcohol (buzzed, drunk, or hammered) correlates with a 'fatal' injury severity; reducing confidence also included tipsy
+- Alcohol (tipsy, drunk, hammered) correlates with Male
+
+Length 2 or 3 (247 rules) 
+
+- Sobriety correlates with no injury, single fatality crashes, no drugs, clear conditions, older, rural
+
+Length 2 or 3, support 0.01, confidence 0.7 (2341 rules)
+
+- Fatal injury severity correlates with alcohol plus combos with other seemingly random variables
+
+Length 2-4 (8848 rules)
+
+- Sobriety corresponds with no injury
+
+Length 2-4, support 0.01, confidence 0.7 (418 rules)
+
+- Fatal injury correlates with alcohol
+
+## Analysis for Region, Elderly, Urban vs Rural
+
+```{r}
+
+#now using the apriori algortihm to analyze each region
+crash_apriori_northeast <- apriori(crash_drivers_only_cat, parameter = list(support = 0.01, confidence = 0.7, minlen = 2, maxlen = 3)) 
+crash_apriori_northeast <- subset(crash_apriori_northeast, items %pin% "Northeast")
+crash_apriori_northeast <- sort(crash_apriori_northeast, by = "lift")
+summary(crash_apriori_northeast)
+inspect(crash_apriori_northeast[1:10,])
+
+crash_apriori_south <- apriori(crash_drivers_only_cat, parameter = list(support = 0.01, confidence = 0.7, minlen = 2, maxlen = 3)) 
+crash_apriori_south <- subset(crash_apriori_south, items %pin% "South")
+crash_apriori_south <- sort(crash_apriori_south, by = "lift")
+summary(crash_apriori_south)
+inspect(crash_apriori_south[1:10,])
+
+crash_apriori_west <- apriori(crash_drivers_only_cat, parameter = list(support = 0.01, confidence = 0.7, minlen = 2, maxlen = 3)) 
+crash_apriori_west <- subset(crash_apriori_west, items %pin% "West")
+crash_apriori_west <- sort(crash_apriori_west, by = "lift")
+summary(crash_apriori_west)
+inspect(crash_apriori_west[1:10,])
+
+crash_apriori_midwest <- apriori(crash_drivers_only_cat, parameter = list(support = 0.01, confidence = 0.7, minlen = 2, maxlen = 3)) 
+crash_apriori_midwest <- subset(crash_apriori_midwest, items %pin% "Midwest")
+crash_apriori_midwest <- sort(crash_apriori_midwest, by = "lift")
+summary(crash_apriori_midwest)
+inspect(crash_apriori_midwest[1:10,])
+
+#now using the apriori algortihm to analyze elderly drivers
+crash_apriori_elderly <- apriori(crash_drivers_only_cat, parameter = list(support = 0.01, confidence = 0.7, minlen = 2, maxlen = 3)) 
+crash_apriori_elderly <- subset(crash_apriori_elderly, items %pin% "Elderly")
+crash_apriori_elderly <- sort(crash_apriori_elderly, by = "lift")
+summary(crash_apriori_elderly)
+inspect(crash_apriori_elderly[1:3,])
+
+#now using the apriori algortihm to analyze rural vs urban roadways
+crash_apriori_rural <- apriori(crash_drivers_only_cat, parameter = list(support = 0.001, confidence = 0.7, minlen = 2, maxlen = 2)) 
+crash_apriori_rural <- subset(crash_apriori_rural, items %pin% "Rural")
+crash_apriori_rural <- sort(crash_apriori_rural, by = "lift")
+summary(crash_apriori_rural)
+inspect(crash_apriori_rural[1:4,])
+
+crash_apriori_urban <- apriori(crash_drivers_only_cat, parameter = list(support = 0.001, confidence = 0.6, minlen = 2, maxlen = 2)) 
+crash_apriori_urban <- subset(crash_apriori_urban, items %pin% "Urban")
+crash_apriori_urban <- sort(crash_apriori_urban, by = "lift")
+summary(crash_apriori_urban)
+inspect(crash_apriori_urban[1:6,])
+```
+
+Analysis for northeast revelaed no rules with significant lift, or what we already knew: alcohol correlates with injury severity and multiple fatalities.
+
+South mostly confirmed what we knew.  Alcohol and drugs mean more fatal injuries, more male,  Sober means more non-fatal injuries, more elderly.  Interestingly, elderly drivers in the south correlated with more fatal injury severity.
+
+West also shows alcohol means more fatal injury severity.  Similar to south, elderly drivers correlated with more fatal injury severity.  Men more likley to drive in snow.  Elderly more likely to be sober.
+
+Midwest also shows alcohol means more fatal injury severity.  Similar to south, elderly drivers correlated with more fatal injury severity.  Men more likley to drive in snow.  Elderly more likely to be sober.
+
+## ECLAT Algorithm
+
+```{r rules_eclat}
+#now nalyzing using the ECLAT algorithm 
+crash_eclat_rules <- eclat(crash_drivers_only_cat, parameter=list(supp=0.1, maxlen=2))
+crash_eclat_rules <- ruleInduction(crash_eclat_rules)
+crash_eclat_rules <- sort(crash_eclat_rules, by = c("lift", "confidence"))
+print(crash_eclat_rules)
+inspect(crash_eclat_rules[1:10])
+```
+
+For eclat, max length of 2, support of .01:
+
+- Fatal injury severity connected to alcohol
+- Sobriety connected with less severe or no injuries
+- Men more likley to have alcohol
+
+For eclat, max length of 2, support of .1:
+
+- Sober connected with older, no injury, Tues/Wends/Monday 
+
+```{r detaches from part A}
+#detach(cluster)
+#detach(fpc)
+#detach(klaR)
+#detach(clustMixType)
+#detach(dplyr)
+#detach(Matrix)
+#detach(arules)
+#detach(arulesViz)
+```
+
+#Part B
+
+```{r loads for part B}
+library(dummies)
+library(class)
+library(e1071)
+library(rpart)
+library(rpart.plot)
+library(caret)
+library(ROCR)
+library(knitr)
+library(naivebayes)
+```
+
+###Data File Prep  
+
+We will drop the ID and Zip.Code columns and also recode Education variable into a factor variable.
+ 
+```{r data prep}
+bank.df <- read.csv("UniversalBank.csv")
+bank.df <- bank.df[,-c(1,5)] # drop ID and zip code columns.  
+# create categorical variable for education
+bank.df$Education <- factor(bank.df$Education, levels = c(1,2,3), labels = c("Undergrad", "Graduate", "Advanced/Professional"))
+```
+
+## Decision Tree Model
+
+The first model we'll look at from homework 1 is the Decision Tree model.
+
+```{r}
+bank.dt <- bank.df
+cols.dt <- c(8,9,10,11,12)
+bank.dt[cols.dt] <- lapply(bank.dt[cols.dt], factor) #makes these categorical variables  
+bank.train.dt <- bank.dt[1:4000,] #creates training set
+bank.test.dt <- bank.dt[4001:5000,] #creates test set
+
+set.seed(123) #standardizes starting point
+bank.rpart <- rpart(Personal.Loan ~ ., data=bank.train.dt, method="class", parms=list(split="information"),                                  control=rpart.control(minsplit = 1)) # decision tree model
+rpart.plot(bank.rpart, type=0, extra=101) # plots the decision tree on training set
+
+prediction.dt <- predict(bank.rpart, bank.test.dt, type = "class") #predicts test set versus the model
+table.dt <- table(prediction.dt, bank.test.dt$Personal.Loan) #confusion matrix of results
+print(table.dt)
+```
+
+### Evaluating Decision Tree Performance
+
+```{r hand_calc for decision tree}
+DT_TP = 73 #true positives from confusion matrix in DT model
+DT_TN = 910 #true negatives from confusion matrix in DT model
+DT_FP = 7 #false positives from confusion matrix in DT model
+DT_FN = 10 #false negatives from confusion matrix in DT model
+
+DT_Sensitivity = DT_TP/(DT_TP+DT_FN) #true positive rate; recall; TP/(TP+FN)
+DT_Specificity = DT_TN/(DT_TN+DT_FP) #how often is the prediction negative when actual is negative?
+DT_Precision = DT_TP/(DT_TP+DT_FP) #how often is prediction positive when actual is positive?
+DT_Accuracy = (DT_TP+DT_TN)/(DT_TP+DT_TN+DT_FP+DT_FN) #how often is classifier correct
+
+DT_Value<-round(c(DT_TP,DT_TN,DT_FP,DT_FN,DT_Sensitivity,DT_Specificity,DT_Precision,DT_Accuracy),digits=3)
+Measure<-c("True Positive","True Negative","False Positive","False Negative","Sensitivity/Recall=TP/(TN+FP)",
+         "Specificity=TN/(TN+TP)","Precision=TP/(TP+FP)","Accuracy=(TP+TN)/total")
+
+DT_table<-as.data.frame(cbind(Measure,DT_Value))
+
+kable(DT_table)
+```
+
+### Kappa Statistic for Decision Tree model
+
+```{r hand_kappa}
+
+DT_Observed_Accuracy = (73+910)/1000 #(TP+TN)
+DT_Expected_Accuracy_NO = (920*917)/1000  #(TN+FN)*(TN+FP)
+DT_Expected_Accuracy_YES = (80*83)/1000 #(TP+FP)*(TP+FN)
+DT_Expected_Accuracy_BOTH_CLASSES = (DT_Expected_Accuracy_NO+DT_Expected_Accuracy_YES)/1000
+DT_Kappa_Statistic = (DT_Observed_Accuracy-DT_Expected_Accuracy_BOTH_CLASSES)/(1-DT_Expected_Accuracy_BOTH_CLASSES)
+
+DT_Kappa_table<-cbind(DT_Observed_Accuracy,DT_Expected_Accuracy_NO,DT_Expected_Accuracy_YES,DT_Expected_Accuracy_BOTH_CLASSES, DT_Kappa_Statistic)
+
+DT_Kappa_table_t<-t(DT_Kappa_table)
+
+colnames(DT_Kappa_table_t)<-c("DT_Value")
+
+kable(DT_Kappa_table_t)
+```
+
+Decision tree show as Almost Perfect per Landis & Koch, Excellent per Fleiss:
+
+Landis & Koch (1977):
+
+| Range      | Strength      |  
+|------------|---------------|
+| 0 - 0.2    | Poor          |
+| 0.21 - 0.4 | Fair          |
+| 0.41 - 0.6 | Moderate      |  
+| 0.61 - 0.8 | Substantial   |  
+| 0.81 - 1.0 | Almost perfect|
+
+
+Fleiss (1981):
+
+
+| Range      | Strength      |  
+|------------|---------------|
+| 0 - 0.4    | Poor          |
+| 0.41 - 0.75| Fair to Good  |
+| 0.75 - 1   | Excellent     |  
+
+### ROC Curve for Decision tree model
+
+```{r ROC_dt}
+
+DT_rpart_pred_prob <- predict(bank.rpart, bank.test.dt, type="prob") 
+DT_rpart_pred_prob_2 <- prediction(DT_rpart_pred_prob[,2], bank.test.dt$Personal.Loan)
+DT_rpart.perf <- performance(DT_rpart_pred_prob_2,"tpr","fpr")
+plot(DT_rpart.perf, main = "ROC Curve for Decision Tree Model", col=2, lwd=2)
+abline(a=0,b=1,lwd=2,lty=2,col="gray")
+
+unlist(DT_rpart.perf@y.values) #This is the AUC value (area under the ROC curve)
+```
+
+### K-Fold Cross Validation of the Decision Tree Model
+
+```{r kfoldcv}
+DT_fitControl <- trainControl(method="cv", number=10) #use fitControl to set options for k-fold cross validation
+
+set.seed(123)
+DT_bank_10folds <- train(Personal.Loan ~ ., data=bank.train.dt, method="rpart", metric="Accuracy", trControl=DT_fitControl) #train function in caret and pass rpart through it
+DT_bank_10folds
+```
+
+Now we calculate the error rate of the chosen decision tree on the validation set. 
+
+```{r kfoldcv.rpart}
+DT_10folds_prediction <- predict(DT_bank_10folds, bank.test.dt, type = "raw") #predicts test set versus the model
+DT_10folds_table <- table(DT_10folds_prediction, bank.test.dt$Personal.Loan) #confusion matrix of results
+print(DT_10folds_table)
+```
+
+```{r kfoldcv.kappa}
+DT_fitControl <- trainControl(method="cv", number=10) #use fitControl to set options for k-fold cross validation
+
+set.seed(123)
+DT_bank_10folds_kappa<-train(Personal.Loan ~ ., data=bank.train.dt, method="rpart", metric="Kappa", trControl=DT_fitControl) #train function in caret and pass rpart through it
+DT_bank_10folds_kappa
+```
+
+### Repeated k-fold Cross Validation of Decision Tree model
+
+```{r repeatedkfoldcv}
+DT_fitControl_repeated <- trainControl(method="repeatedcv", number=10, repeats=5) #10-fold cross validation #repeated 5 times.
+
+set.seed(123)
+DT_bank_10folds_rp<-train(Personal.Loan ~ ., data=bank.train.dt, method="rpart", metric="Accuracy", trControl=DT_fitControl_repeated)
+DT_bank_10folds_rp
+
+DT_10folds_prediction_rp <- predict(DT_bank_10folds_rp, bank.test.dt, type = "raw") #predicts test set versus the model
+DT_10folds_rp_table <- table(DT_10folds_prediction_rp, bank.test.dt$Personal.Loan) #confusion matrix of results
+print(DT_10folds_rp_table)
+```
+
+### Leave-one-out Cross Validation (LOOCV) of the Decision Tree model
+
+```{r loocv}
+DT_fitControl_loocv <- trainControl(method="LOOCV") #LOOCV validation 
+
+set.seed(123)
+DT_bank_10folds_loocv<-train(Personal.Loan ~ ., data=bank.train.dt, method="rpart", metric="Accuracy", trControl=DT_fitControl_loocv)
+DT_bank_10folds_loocv
+
+DT_10folds_prediction_loocv <- predict(DT_bank_10folds_loocv, bank.test.dt, type = "raw") #predicts test set versus the model
+DT_10folds_loocv_table <- table(DT_10folds_prediction_loocv, bank.test.dt$Personal.Loan) #confusion matrix of results
+print(DT_10folds_loocv_table)
+```
+
+### Bootstrapping of the Decision Tree Model
+
+```{r bootstrap}
+DT_cvCtrl <- trainControl(method="boot", number=10) #10 bootstrapped samples.
+set.seed(123)
+DT_bank_bootstrap<-train(Personal.Loan ~ ., data=bank.train.dt, method="rpart", metric="Accuracy", trControl=DT_cvCtrl)
+DT_bank_bootstrap
+
+DT_prediction_bootstrap <- predict(DT_bank_bootstrap, bank.test.dt, type = "raw") #predicts test set versus the model
+DT_bootstrap_table <- table(DT_prediction_bootstrap, bank.test.dt$Personal.Loan) #confusion matrix of results
+print(DT_bootstrap_table)
+```
+
+## Comparing Decision Tree, Naive Bayes, and KNN Model Performance
+
+First I'll create a test/train split that all models will use for comparison:
+
+```{r compare_split}
+set.seed(123)
+Bank_Index <- createDataPartition(bank.dt$Personal.Loan, p = .8,list = FALSE,times = 1)
+Bank_train <- bank.dt[Bank_Index,]
+Bank_test <- bank.dt[-Bank_Index,] 
+```
+
+### Decision tree with 3 fold cross validation:
+
+```{r dt cv3}
+DT_cvCtrl_3 <- trainControl(method="cv", number=3) 
+set.seed(123)
+DT_cv3<-train(Personal.Loan~ ., data=Bank_train, method="rpart", metric="Accuracy", trControl=DT_cvCtrl_3)
+DT_cv3
+
+DT_prediction_cv3 <- predict(DT_cv3, Bank_test, type = "raw") #predicts test set versus the model
+DT_cv3_table <- table(DT_prediction_cv3, Bank_test$Personal.Loan) #confusion matrix of results
+print(DT_cv3_table)
+```
+
+#### KNN with 3 fold cross validation:
+
+```{r knn cv3}
+options(warn=-1)
+
+KNN_cvCtrl_3 <- trainControl(method="cv", number=3) 
+set.seed(123)
+KNN_cv3<-train(Personal.Loan ~., data=Bank_train, method="knn", metric="Accuracy", trControl=KNN_cvCtrl_3)
+KNN_cv3
+
+KNN_prediction_cv3 <- predict(KNN_cv3, Bank_test, type = "raw") #predicts test set versus the model
+KNN_cv3_table <- table(KNN_prediction_cv3, Bank_test$Personal.Loan) #confusion matrix of results
+print(KNN_cv3_table)
+```
+
+#### Naive Bayes with 3 fold cross validation:
+
+```{r nb cv3}
+options(warn=-1)
+
+NB_cvCtrl_3 <- trainControl(method="cv", number=3) 
+set.seed(123)
+NB_cv3<-train(Personal.Loan~ ., data=Bank_train, method = 'naive_bayes', metric="Accuracy", trControl=NB_cvCtrl_3)
+NB_cv3
+
+NB_prediction_cv3 <- predict(NB_cv3, Bank_test, type = "raw") #predicts test set versus the model
+NB_cv3_table <- table(NB_prediction_cv3, Bank_test$Personal.Loan) #confusion matrix of results
+print(NB_cv3_table)
+```
+
+### ROC diagram comparing multiple models
+
+```{r}
+#Creates a ROC curve
+DT_cv3_pred_prob <- predict(DT_cv3, Bank_test, type="prob") 
+DT_cv3_pred_prob_2 <- prediction(DT_cv3_pred_prob[,2], Bank_test$Personal.Loan)
+DT_cv3_perf <- performance(DT_cv3_pred_prob_2,"tpr","fpr")
+
+KNN_cv3_pred_prob <- predict(KNN_cv3, Bank_test, type="prob") 
+KNN_cv3_pred_prob_2 <- prediction(KNN_cv3_pred_prob[,2], Bank_test$Personal.Loan)
+KNN_cv3_perf <- performance(KNN_cv3_pred_prob_2,"tpr","fpr")
+
+NB_cv3_pred_prob <- predict(NB_cv3, Bank_test, type="prob") 
+NB_cv3_pred_prob_2 <- prediction(NB_cv3_pred_prob[,2], Bank_test$Personal.Loan)
+NB_cv3_perf <- performance(NB_cv3_pred_prob_2,"tpr","fpr")
+
+plot(DT_cv3_perf, main = "ROC Curves", col="red", lwd=2)
+plot(KNN_cv3_perf, add = TRUE, col="blue", lwd=2)
+plot(NB_cv3_perf, add = TRUE, col="green", lwd=2)
+abline(a=0,b=1,lwd=2,lty=2,col="gray")
+```
+
+## Analysis of the Logistic Regression Model
+
+```{r logit}
+logit.reg <- glm(Personal.Loan ~., data = Bank_train, family = "binomial")
+options(scipen=999)
+summary(logit.reg)
+```
+
+Now the prediction:
+
+```{r predict_glm}
+
+Bank_glm_prediction <- predict(logit.reg, newdata = Bank_test) #predicts the logit for the test set
+Bank_glm_prediction_odds <- data.frame(exp(Bank_glm_prediction)) # converts logit to odds
+Bank_glm_prediction_probability <- data.frame(Bank_glm_prediction_odds/(1+Bank_glm_prediction_odds)) # converts odds to probability
+Bank_glm_prediction_yes_no <- round(Bank_glm_prediction_probability, digits=0) #converts probability to 1 or 0, with a cutoff at 0.5
+Bank_test_actual <- Bank_test$Personal.Loan
+
+GLM_table <- table(unlist(Bank_glm_prediction_yes_no), unlist(Bank_test_actual)) #confusion matrix of results
+print(GLM_table)
+```
+
+Using 0.5 as the cutoff between yes and no (that is, predicting a personal loan or not) yielded the confusion matrix above:
+
+To see if opening up the aperature (that is, reducing the personal loan porobability cutoff for offering a loan) made a difference, here's when the cutoff is at .4 (40%):
+
+```{r predict_glm 0.4}
+
+Bank_glm_prediction_point4 <- ifelse(Bank_glm_prediction_probability < 0.4, 0, 1)
+
+GLM_table_point4 <- table(unlist(Bank_glm_prediction_point4), unlist(Bank_test_actual)) #confusion matrix of results
+print(GLM_table_point4)
+```
+
+At 0.3:
+
+```{r predict_glm 0.3}
+
+Bank_glm_prediction_point3 <- ifelse(Bank_glm_prediction_probability < 0.3, 0, 1)
+
+GLM_table_point3 <- table(unlist(Bank_glm_prediction_point3), unlist(Bank_test_actual)) #confusion matrix of results
+print(GLM_table_point3)
+```
+
+At 0.2:
+
+```{r predict_glm 0.2}
+
+Bank_glm_prediction_point2 <- ifelse(Bank_glm_prediction_probability < 0.2, 0, 1)
+
+GLM_table_point2 <- table(unlist(Bank_glm_prediction_point2), unlist(Bank_test_actual)) #confusion matrix of results
+print(GLM_table_point2)
+```
+
+At 0.1:
+
+```{r predict_glm 0.1}
+
+Bank_glm_prediction_point1 <- ifelse(Bank_glm_prediction_probability < 0.1, 0, 1)
+
+GLM_table_point1 <- table(unlist(Bank_glm_prediction_point1), unlist(Bank_test_actual)) #confusion matrix of results
+print(GLM_table_point1)
+```
+
+At 0.01:
+
+
+```{r predict_glm 0.01}
+
+Bank_glm_prediction_point01 <- ifelse(Bank_glm_prediction_probability < 0.01, 0, 1)
+
+GLM_table_point01 <- table(unlist(Bank_glm_prediction_point01), unlist(Bank_test_actual)) #confusion matrix of results
+print(GLM_table_point01)
+```
+
+We see a drop in the number of false negatives, which is the worst possibility in this scenario: it's the equivalent of a loan not offered where one would have been taken. That said, the jump from 0.1 to 0.01 shows diminishing returns: the number of loans offered jumps by 219% to achieve a 14% increase in loans accepted. This may or may not be an accecptable trade off depending on how much it costs to market the loan. 
+
+### Evaluating GLM Model Performance
+
+Calculation when a probability 0.5 is the cutoff for offering a loan:
+
+```{r GLM hand_calc5}
+GLM_point5_TP = 62
+GLM_point5_TN = 890
+GLM_point5_FP = 14
+GLM_point5_FN = 34
+
+GLM_point5_Sensitivity = GLM_point5_TP/(GLM_point5_TP+GLM_point5_FN) #true positive rate; recall; TP/(TP+FN)
+GLM_point5_Specificity = GLM_point5_TN/(GLM_point5_TN+GLM_point5_FP) #how often is the prediction negative when actual is negative?
+GLM_point5_Precision = GLM_point5_TP/(GLM_point5_TP+GLM_point5_FP) #how often is prediction positive when actual is positive?
+GLM_point5_Accuracy = (GLM_point5_TP+GLM_point5_TN)/(GLM_point5_TP+GLM_point5_TN+GLM_point5_FP+GLM_point5_FN) #how often is classifier correct
+
+GLM_point5_Value<-round(c(GLM_point5_TP,GLM_point5_TN,GLM_point5_FP,GLM_point5_FN,GLM_point5_Sensitivity,GLM_point5_Specificity,GLM_point5_Precision,GLM_point5_Accuracy),digits=3)
+GLM_point5_Measure<-c("True Positive","True Negative","False Positive","False Negative","Sensitivity/Recall=TP/(TN+FP)",
+         "Specificity=TN/(TN+TP)","Precision=TP/(TP+FP)","Accuracy=(TP+TN)/total")
+
+GLM_point5_table<-as.data.frame(cbind(GLM_point5_Measure,GLM_point5_Value))
+
+
+kable(GLM_point5_table)
+```
+
+Calculation where 0.1 is the cutoff probability for offering a loan:
+
+```{r GLM hand_calc1}
+GLM_point1_TP = 81
+GLM_point1_TN = 809
+GLM_point1_FP = 95
+GLM_point1_FN = 15
+
+GLM_point1_Sensitivity = GLM_point1_TP/(GLM_point1_TP+GLM_point1_FN) #true positive rate; recall; TP/(TP+FN)
+GLM_point1_Specificity = GLM_point1_TN/(GLM_point1_TN+GLM_point1_FP) #how often is the prediction negative when actual is negative?
+GLM_point1_Precision = GLM_point1_TP/(GLM_point1_TP+GLM_point1_FP) #how often is prediction positive when actual is positive?
+GLM_point1_Accuracy = (GLM_point1_TP+GLM_point1_TN)/(GLM_point1_TP+GLM_point1_TN+GLM_point1_FP+GLM_point1_FN) #how often is classifier correct
+
+GLM_point1_Value<-round(c(GLM_point1_TP,GLM_point1_TN,GLM_point1_FP,GLM_point1_FN,GLM_point1_Sensitivity,GLM_point1_Specificity,GLM_point1_Precision,GLM_point1_Accuracy),digits=3)
+GLM_point1_Measure<-c("True Positive","True Negative","False Positive","False Negative","Sensitivity/Recall=TP/(TN+FP)",
+         "Specificity=TN/(TN+TP)","Precision=TP/(TP+FP)","Accuracy=(TP+TN)/total")
+
+GLM_point1_table<-as.data.frame(cbind(GLM_point1_Measure,GLM_point1_Value))
+
+
+kable(GLM_point1_table)
+```
+
+### Kappa Statistic for the GLM at 0.5 probability
+
+```{r hand_kappa GLM 0.5}
+
+GLM_point5_Observed_Accuracy = (62+890)/1000 #(TP+TN)
+GLM_point5_Expected_Accuracy_NO = (924*904)/1000  #(TN+FN)*(TN+FP)
+GLM_point5_Expected_Accuracy_YES = (76*96)/1000 #(TP+FP)*(TP+FN)
+GLM_point5_Expected_Accuracy_BOTH_CLASSES = (GLM_point5_Expected_Accuracy_NO+GLM_point5_Expected_Accuracy_YES)/1000
+GLM_point5_Kappa_Statistic = (GLM_point5_Observed_Accuracy-GLM_point5_Expected_Accuracy_BOTH_CLASSES)/(1-GLM_point5_Expected_Accuracy_BOTH_CLASSES)
+
+GLM_point5_Kappa_table<-cbind(GLM_point5_Observed_Accuracy,GLM_point5_Expected_Accuracy_NO,GLM_point5_Expected_Accuracy_YES,GLM_point5_Expected_Accuracy_BOTH_CLASSES, GLM_point5_Kappa_Statistic)
+
+GLM_point5_Kappa_table_t<-t(GLM_point5_Kappa_table)
+
+colnames(GLM_point5_Kappa_table_t)<-c("GLM_point5_Value")
+
+kable(GLM_point5_Kappa_table_t)
+```
+
+Landis & Koch would rank this GLM (0.5) as 'substantial', Fleiss as 'fair to good'.
+
+### Kappa Statistic for the GLM at 0.1 probability
+
+```{r hand_kappa GLM 0.1}
+
+GLM_point1_Observed_Accuracy = (81+809)/1000 #(TP+TN)
+GLM_point1_Expected_Accuracy_NO = (824*904)/1000  #(TN+FN)*(TN+FP)
+GLM_point1_Expected_Accuracy_YES = (176*96)/1000 #(TP+FP)*(TP+FN)
+GLM_point1_Expected_Accuracy_BOTH_CLASSES = (GLM_point1_Expected_Accuracy_NO+GLM_point1_Expected_Accuracy_YES)/1000
+GLM_point1_Kappa_Statistic = (GLM_point1_Observed_Accuracy-GLM_point1_Expected_Accuracy_BOTH_CLASSES)/(1-GLM_point1_Expected_Accuracy_BOTH_CLASSES)
+
+GLM_point1_Kappa_table<-cbind(GLM_point1_Observed_Accuracy,GLM_point1_Expected_Accuracy_NO,GLM_point1_Expected_Accuracy_YES,GLM_point1_Expected_Accuracy_BOTH_CLASSES, GLM_point1_Kappa_Statistic)
+
+GLM_point1_Kappa_table_t<-t(GLM_point1_Kappa_table)
+
+colnames(GLM_point1_Kappa_table_t)<-c("GLM_point1_Value")
+
+kable(GLM_point1_Kappa_table_t)
+```
+
+Landis & Koch would rank this GLM (0.1) as 'moderate', Fleiss as 'fair to good'.
+
+## KNN Model
+
+### KNN Model setup and prediction
+
+First, convert to dummy variables and create a normalized version of the bank data.  Then, create training and test sets from this normalized version using an 80/20 split.
+
+```{r}
+
+dummy.bank.df <- dummy.data.frame(bank.df, sep = ":") # creates dummy variable since 'Education' is in words
+normalize <- function(x) {return ((x-min(x))/(max(x)-min(x)))} # normalize function
+bank.normalized <- as.data.frame(lapply(dummy.bank.df,normalize))
+bank.normalized.train <- bank.normalized[1:4000,] # creates training set
+bank.normalized.test <- bank.normalized[4001:5000,] # creates test set
+bank.normalized.no.pl <- as.data.frame(lapply(dummy.bank.df[-10],normalize)) # normalizes all variables to be from 0 to 1 so they have the same scale, and deletes Personal.Loan (since that's what we're trying to predict)
+bank.normalized.train.no.pl <- bank.normalized.no.pl[1:4000,] # creates training set
+bank.normalized.test.no.pl <- bank.normalized.no.pl[4001:5000,] # creates test set
+
+knn_model <- knn(train = bank.normalized.train.no.pl, test = bank.normalized.test.no.pl, cl = dummy.bank.df$Personal.Loan[1:4000], k=1) # creates KNN model, k=1 per discussion below
+knn_model_confusion_matrix <- table(knn_model,dummy.bank.df[4001:5000,10]) # calculates confusion matrix (predictions versus actual for each customer in the test set)
+print(knn_model_confusion_matrix)
+```
+
+## Evaluating KNN Model Performance
+
+```{r hand_calc}
+KNN_TP = 60
+KNN_TN = 907
+KNN_FP = 10
+KNN_FN = 23
+
+KNN_Sensitivity = KNN_TP/(KNN_TP+KNN_FN) #true positive rate; recall; TP/(TP+FN)
+KNN_Specificity = KNN_TN/(KNN_TN+KNN_FP) #how often is the prediction negative when actual is negative?
+KNN_Precision = KNN_TP/(KNN_TP+KNN_FP) #how often is prediction positive when actual is positive?
+KNN_Accuracy = (KNN_TP+KNN_TN)/(KNN_TP+KNN_TN+KNN_FP+KNN_FN) #how often is classifier correct
+
+
+KNN_Value<-round(c(KNN_TP,KNN_TN,KNN_FP,KNN_FN,KNN_Sensitivity,KNN_Specificity,KNN_Precision,KNN_Accuracy),digits=3)
+KNN_Measure<-c("True Positive","True Negative","False Positive","False Negative","Sensitivity/Recall=TP/(TN+FP)",
+         "Specificity=TN/(TN+TP)","Precision=TP/(TP+FP)","Accuracy=(TP+TN)/total")
+
+KNN_table<-as.data.frame(cbind(KNN_Measure,KNN_Value))
+
+
+kable(KNN_table)
+```
+
+## Kappa Statistic for KNN
+
+```{r hand_kappa for KNN}
+
+KNN_Observed_Accuracy = (60+907)/1000 #(TP+TN)
+KNN_Expected_Accuracy_NO = (930*917)/1000  #(TN+FN)*(TN+FP)
+KNN_Expected_Accuracy_YES = (70*83)/1000 #(TP+FP)*(TP+FN)
+KNN_Expected_Accuracy_BOTH_CLASSES = (KNN_Expected_Accuracy_NO+KNN_Expected_Accuracy_YES)/1000
+KNN_Kappa_Statistic = (KNN_Observed_Accuracy-KNN_Expected_Accuracy_BOTH_CLASSES)/(1-KNN_Expected_Accuracy_BOTH_CLASSES)
+
+KNN_Kappa_table<-cbind(KNN_Observed_Accuracy,KNN_Expected_Accuracy_NO,KNN_Expected_Accuracy_YES,KNN_Expected_Accuracy_BOTH_CLASSES, KNN_Kappa_Statistic)
+
+KNN_Kappa_table_t<-t(KNN_Kappa_table)
+
+colnames(KNN_Kappa_table_t)<-c("value")
+
+kable(KNN_Kappa_table_t)
+```
+
+Landis & Koch would rate this KNN model 'substantial', Fleiss 'excellent'.  
+
+## Naive Bayes Model Analysis
+
+### Model setup and prediction
+
+```{r NB model from homework 1}
+
+bank.nb <- bank.df
+cols <- c(8,9,10,11,12)
+bank.nb[cols] <- lapply(bank.nb[cols], factor) #makes these columns categorical variables
+bank.train.nb <- bank.nb[1:4000,] # creates training set
+bank.test.nb <- bank.nb[4001:5000,] # creates test set
+Personal.Loan.Classifier.nb <- naiveBayes(Personal.Loan ~ ., data = bank.train.nb) # creates the Naive Bayes model
+Prediction.nb <- predict(Personal.Loan.Classifier.nb, bank.test.nb) # predicts
+Table.nb <- table(Prediction.nb,bank.test.nb$Personal.Loan) # creates a table to see results
+print(Table.nb) 
+```
+
+### Evaluating NB Model Performance
+
+```{r hand_calc NB}
+NB_TP = 53
+NB_TN = 867
+NB_FP = 50
+NB_FN = 30
+
+NB_Sensitivity = NB_TP/(NB_TP+NB_FN) #true positive rate; recall; TP/(TP+FN)
+NB_Specificity = NB_TN/(NB_TN+NB_FP) #how often is the prediction negative when actual is negative?
+NB_Precision = NB_TP/(NB_TP+NB_FP) #how often is prediction positive when actual is positive?
+NB_Accuracy = (NB_TP+NB_TN)/(NB_TP+NB_TN+NB_FP+NB_FN) #how often is classifier correct
+
+
+NB_Value<-round(c(NB_TP,NB_TN,NB_FP,NB_FN,NB_Sensitivity,NB_Specificity,NB_Precision,NB_Accuracy),digits=3)
+NB_Measure<-c("True Positive","True Negative","False Positive","False Negative","Sensitivity/Recall=TP/(TN+FP)",
+         "Specificity=TN/(TN+TP)","Precision=TP/(TP+FP)","Accuracy=(TP+TN)/total")
+
+NB_table<-as.data.frame(cbind(NB_Measure,NB_Value))
+
+
+kable(NB_table)
+```
+
+### Kappa Statistic for NB
+
+```{r hand_kappa for NB}
+
+NB_Observed_Accuracy = (53+867)/1000 #(TP+TN)
+NB_Expected_Accuracy_NO = (897*917)/1000  #(TN+FN)*(TN+FP)
+NB_Expected_Accuracy_YES = (103*83)/1000 #(TP+FP)*(TP+FN)
+NB_Expected_Accuracy_BOTH_CLASSES = (NB_Expected_Accuracy_NO+NB_Expected_Accuracy_YES)/1000
+NB_Kappa_Statistic = (NB_Observed_Accuracy-NB_Expected_Accuracy_BOTH_CLASSES)/(1-NB_Expected_Accuracy_BOTH_CLASSES)
+
+NB_Kappa_table<-cbind(NB_Observed_Accuracy,NB_Expected_Accuracy_NO,NB_Expected_Accuracy_YES,NB_Expected_Accuracy_BOTH_CLASSES, NB_Kappa_Statistic)
+
+NB_Kappa_table_t<-t(NB_Kappa_table)
+
+colnames(NB_Kappa_table_t)<-c("value")
+
+kable(NB_Kappa_table_t)
+```
+
+Landis & Koch would rank this NB model as 'moderate', Fleiss as 'fair to good'.

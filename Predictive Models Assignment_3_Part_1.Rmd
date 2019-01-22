@@ -1,0 +1,314 @@
+---
+title: "Assignment_3_Part_1_Atwell"
+author: "Mike Atwell"
+date: "July 17, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Per the problem statement, here we conduct a MCMC using the rstanarm package, using the binomial family.  The data is a survey conducted on a question on gender roles as compared to education level and gender of the respondent.  First we'll import the data:
+
+## Libraries and Data
+
+```{r}
+library(HSAUR3)
+library(rstanarm)
+data("womensrole", package = "HSAUR3")
+womensrole_df<-data.frame(womensrole)
+```
+
+The dataset is small (42x5) and a review of the data shows no nulls or irregularities.
+
+## Logits model of Women's role versus gender and education
+
+Now let's run a logits model.
+
+```{r}
+womensrole$total <- womensrole$agree + womensrole$disagree
+womensrole_glm_1A <- glm(cbind(agree, disagree) ~ education + gender,
+                        data = womensrole, family = binomial(link = "logit"))
+round(coef(summary(womensrole_glm_1A)), 3)
+```
+
+'Intercept' tells us the output value of the glm when all variables are 0, in this case equivalent to a male with an education level of 0.  'Education' is the coefficient of the education variable in the glm.  For gender, since this is a categorical variable with only two possible outcomes, this value is included (in this case) if the gender is female, but is 0 if the gender is male.  'Estimate' tells us the value of the intercept of the coefficient for that variable.  The 'std. error' is the standard deviation of the estimate value.  Z value is the parameter estimate divided by the std error, and is a test statistic for the null hypothesis. Pr>|z| is a measure of statistical significance, with 0.05 or less used as a general cut off for statistical significance.  
+
+Here we see that gender has a light negative affect (that is, females were less likley to agree with the statement), but isn't statistically significant.  Education has larger negative affect (more education means less agreement with the statement) and is statistically significant.
+
+Now let's run the Bayesian:
+
+```{r}
+womensrole_bglm_1A <- stan_glm(cbind(agree, disagree) ~ education + gender,
+                              
+                              data = womensrole,
+                              
+                              family = binomial(link = "logit"), 
+                              
+                              prior = student_t(df = 7), 
+                              
+                              prior_intercept = student_t(df = 7),
+                              
+                              chains = 4, cores = 2, seed = 12345, iter=3000)
+
+womensrole_bglm_1A
+
+
+
+summary(womensrole_bglm_1A)
+```
+
+Here the intercept, education, and gender mean the same as above.  'Median' is the median value of the posterior distribution calculated for that parameter, and we see that it's similar to what the glm calculated above.  MAD_SD is Median Absolute Deviation of the posterior distrubution median, and we see that it's similar in value to estimate and standard error calculated above in the glm.   
+
+The sample average posterior predictive distribution of y (mean_ppd) shows the median and Median Absolute Deviation of the outcome.  
+
+The estimates block shows the mean, standard deviation, and possible values along the probability distribution for that parameter.  Education, gender, and mean_PPD are defined above.  Log-posterior is sum across all data points of the logarithm of the posterior density.  
+
+In the diagnostics block, mcse are all 0. The Rhat's are all 1, suggesting the chains have converged.  As noted in the output block, 'n_eff is a crude measure of effective sample size'.  
+
+
+
+```{r}
+#Priors
+
+prior_summary(womensrole_bglm_1A, digits = 2)
+
+priors<-prior_summary(womensrole_bglm_1A, digits = 2)
+
+names(priors)
+
+priors$prior$scale
+
+priors$prior$adjusted_scale
+
+
+
+
+
+ci95 <- posterior_interval(womensrole_bglm_1A, prob = 0.95, pars = "education")
+
+round(ci95, 2)
+
+
+
+cbind(Median = coef(womensrole_bglm_1A), MAD_SD = se(womensrole_bglm_1A))
+```
+
+The output summarizes the priors used in the model.  The intercept displayed is when the predictors are centered such that they have a mean of zero.  We see the prior intercept has a location of 0 and 7 degrees of freedom.  Similarly, the coefficients in the prior had a location of 0 and 7 degrees of freedom.  The degrees of freedom were specified when creating the bglm, and since the location wasn't specified, it defaulted to 0.
+
+The next table shows the scale and the adjusted scale values for the coefficients.  We see that only the education value changed (shrank from 2.5 to 0.41), likely due to the fact that education ranges from 0-20, while gender is a categorical variable with only two choices.
+
+The confidence interval shows the 2.5% and 97.5% values along the dposterior distribution of the values of the education coefficient.  
+
+The final table shows the median and MAD_SD of the intercept, education variable, and gender variable of the prior.
+
+
+```{r, echo=FALSE}
+#Traceplots
+
+library(bayesplot)
+
+library(ggplot2)
+
+color_scheme_set("mix-blue-pink")
+
+plot(womensrole_bglm_1A, plotfun = "trace") + ggtitle("Traceplots")
+```
+
+The plots show the progress of the Markov chain as it runs through each iteration, determining the values that will make up the posterior distribution.  We see that the densest part of the plots are centered around their medians.
+
+```{r}
+#ACF
+
+#
+
+plot(womensrole_bglm_1A, plotfun = "acf") + ggtitle("Autocorrelation Plots")
+
+
+
+#we are plotting the 50% uncertainty interval (thick horizontal lines) and the 90% uncertainty interval (thin horizontal lines). In terms of interpretation, the 50% uncertainty interval identifies 
+
+#where 50% of the marginal distribution lies for each parameter.
+
+bayesplot_grid(
+  
+  plot(womensrole_bglm_1A, plotfun = "intervals", prob = 0.5, prob_outer = 0.9, point_est = "median") + ggtitle("Marginal Posterior Parameter Estimates"),
+  
+  plot(womensrole_bglm_1A, plotfun = "areas", prob = 0.5, prob_outer = 0.9, point_est = "median") + ggtitle("Marginal Posterior Parameter Estimates"),
+  
+  grid_args = list(ncol = 2)
+  
+)
+
+```
+
+These plots show the autocorrelation versus the time lag, and the posterior parameter estimates, both in interval format and area format.
+
+```{r}
+#plot the histograms for each parameter (pooled across chains) and the empirical density of each parameter, respectively.
+
+bayesplot_grid(
+  
+  plot(womensrole_bglm_1A, plotfun = "hist") + ggtitle("Marginal Posterior Parameter Distributions"),
+  
+  plot(womensrole_bglm_1A, plotfun = "dens_overlay") + ggtitle("Marginal Posterior Parameter Distributions"), 
+  
+  grid_args = list(nrow = 2)
+  
+)
+
+```
+
+
+
+Here we see the graphs of the probability distributions for the posterior's intercept, education, and gender parameters.
+
+```{r}
+
+```
+
+##Part 1B
+
+For this part I wanted to see the impact of using only 3 degrees of freedom and starting at a prior farther away from the actual.  I also increased the iterations to 30,000 to give the model enough iterations to get past the warmup stage, since it had much further to go.  Additionally, I changed the family to gaussian, which can't use a binomial output variable, so the next line of code is to express agreement as a fraction vice a total numer of agree/disagree.
+
+```{r}
+womensrole_df$agree_fraction <- womensrole_df$agree / (womensrole_df$agree+womensrole_df$disagree)
+
+
+
+womensrole_bglm_1 <- stan_glm(cbind(agree_fraction) ~ education + gender,
+                              
+                              data = womensrole_df,
+                              
+                              family = gaussian(link = "identity"), 
+                              
+                              prior = student_t(df = 3, location=20), 
+                              
+                              prior_intercept = student_t(df = 3, location=20),
+                              
+                              chains = 4, cores = 2, seed = 12345, iter=30000)
+
+womensrole_bglm_1
+
+
+
+s <- summary(womensrole_bglm_1)
+print(s, digits=3)
+
+```
+
+We see that the model arrvied at different answers for median and MAD for the intercept, and the coefficients for each variable, and the sample average posterior predictive distribution.  The gender coefficient and the education MAD_SD both appear as zero, but this is more due to the low number of significant figures (2) than an actual equality.  This result wasn't surprising given that the Gaussian was using different numbers (a fraction vice total number).  The sample size was 40,000 vice 6,000 given the higher numer of iterations.
+
+The log posterior has decreased in absolute size from -107.9 to -9.4 but these numbers aren't truly comparable given the different scale.
+
+MCSE and Rhat's were the same (except for log posterior, which is slightly above zero), suggesting convergence, but the effective sample size for each variable was much larger, as seen in this table:
+
+```{r}
+library(knitr)
+n_eff_1A <- c(4229, 4733, 5681, 5554, 2619)
+n_eff_1B <- c(47929, 60000, 36433, 42744, 20010)
+
+n_eff_compare <- data.frame(n_eff_1A, n_eff_1B)
+row.names(n_eff_compare) <- c("Intercept", "Education", "genderFemale",
+                             "mean_PPD", "log-posterior")
+kable(n_eff_compare)
+```
+
+Again, this comes as no surprise since the further distance of the prior required more samples to get to convergence.
+
+
+```{r}
+#Priors
+
+prior_summary(womensrole_bglm_1, digits = 2)
+
+priors_1B<-prior_summary(womensrole_bglm_1, digits = 2)
+
+names(priors_1B)
+
+priors_1B$prior$scale
+
+priors_1B$prior$adjusted_scale
+
+
+
+
+
+ci95 <- posterior_interval(womensrole_bglm_1, prob = 0.95, pars = "education")
+
+round(ci95, 2)
+
+
+
+cbind(Median = coef(womensrole_bglm_1), MAD_SD = se(womensrole_bglm_1))
+```
+
+The output summarizes the priors used in the model.  The intercept diaplyed is when the predictors are centered such that they have a mean of zero.  We see the prior intercept has a location of 20 and 3 degrees of freedom.  Similarily, the coefficients in the prior had a location of 20 and 3 degrees of freedom.  The degrees of freedom and the location reflect the different prior input I selected, and the scales remained the same.
+
+The next table shows the scale and the adjusted scale values for the coefficients.  We see that both the education value and gender values changed (shrank from 2.5 to 0.12 and 0.73, respectively).
+
+The confidence interval shows the 2.5% and 97.5% values along the dposterior distribution of the values of the education coefficient.  
+
+The final table shows the median and MAD_SD of the intercept, education variable, and gender variable of the prior.
+
+The confidence interval was the same.  The median and MAD_SD were different for all but these aren't strictly comparable due to the different scaling of the target used.
+
+
+```{r, echo=FALSE}
+#Traceplots
+
+library(bayesplot)
+
+library(ggplot2)
+
+color_scheme_set("mix-blue-pink")
+
+plot(womensrole_bglm_1, plotfun = "trace") + ggtitle("Traceplots")
+```
+
+The plots show the progress of the Markov chain as it runs through each iteration, determining the values that will make up the posterior distribution.  We see that the densest part of the plots are centered around their medians, which are changed from the previous result (mainly due to the different scaling of the target).
+
+```{r}
+#ACF
+
+#
+
+plot(womensrole_bglm_1, plotfun = "acf") + ggtitle("Autocorrelation Plots")
+
+
+
+#we are plotting the 50% uncertainty interval (thick horizontal lines) and the 90% uncertainty interval (thin horizontal lines). In terms of interpretation, the 50% uncertainty interval identifies 
+
+#where 50% of the marginal distribution lies for each parameter.
+
+bayesplot_grid(
+  
+  plot(womensrole_bglm_1, plotfun = "intervals", prob = 0.5, prob_outer = 0.9, point_est = "median") + ggtitle("Marginal Posterior Parameter Estimates"),
+  
+  plot(womensrole_bglm_1, plotfun = "areas", prob = 0.5, prob_outer = 0.9, point_est = "median") + ggtitle("Marginal Posterior Parameter Estimates"),
+  
+  grid_args = list(ncol = 2)
+  
+)
+
+```
+
+We see that the lag was longer, especially in gender, where it took nearly twice as long to reach zero.  
+
+```{r}
+#plot the histograms for each parameter (pooled across chains) and the empirical density of each parameter, respectively.
+
+bayesplot_grid(
+  
+  plot(womensrole_bglm_1, plotfun = "hist") + ggtitle("Marginal Posterior Parameter Distributions"),
+  
+  plot(womensrole_bglm_1, plotfun = "dens_overlay") + ggtitle("Marginal Posterior Parameter Distributions"), 
+  
+  grid_args = list(nrow = 2)
+  
+)
+
+```
+
+Here we see the probability distributions, which look a great deal flatter than the curves in the first part using the binomial.  

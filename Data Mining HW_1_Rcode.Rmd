@@ -1,0 +1,222 @@
+---
+title: 'Homework #1'
+author: 'Mike Atwell'
+date: 'March 28, 2018'
+output:
+  html_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dummies)
+library(class)
+library(e1071)
+library(rpart)
+library(rpart.plot)
+library(caret)
+```
+
+# The Business Problem
+
+You were recently hired as a data scientist by Universal Bank. The bank's Vice President is interested in building a model to help predict when users might respond to a campaign to take out a personal loan. She supplies you with a dataset containing information of 5,000 customers and attaches a description about the dataset (see page 3 of this assignment). 
+
+The VP tells you that another analyst has created a logistic regression model and hands you an R code file (please download the Template_HW_1.Rmd file).
+
+## Data file description
+
+The file **UniversalBank.csv** contains data on 5,000 customers. The data include customer demographic information (age, income, etc.), the customer's relationship with the bank (mortgage, securities accounts, etc.), and the customer response to the last personal loan campaign (Personal.Loan). Among these 5,000 customers, only 480 (9.6%) accepted the personal loan that was offered to them in the earlier campaign.  
+
+
+Here is a description of each variable in the Universal Bank dataset:    
+
+**ID**: Customer ID   
+
+**Age**: Customer's age in years    
+
+**Experience**: Number of years of professional work experience  
+
+**Income**: Annual income in thousands of dollars ($000)  
+
+**Zip.Code**: Zip code of home address  
+
+**Family**: Customer's family size  
+
+**CC Avg**: Average spending on credit cards per month in thousands of dollars ($000)  
+
+**Education**: Education level where 1 = Undergraduate; 2 = Graduate; and 3=Advanced/Professional  
+
+**Mortgage**: Value of house mortgage if any; in thousands of dollar ($000)  
+
+**Personal.Loan**: Did the customer accept a personal loan offered in the bank's last campaign? 1=Yes; 0 = No  
+
+**Securities.Account**: Does the customer have a securities account with the bank? 1 = Yes; 0 = No  
+
+**CD.Account**: Does the customer have a certificate of deposit (CD) account with the bank? 1 = Yes; 0 = No  
+
+**Online**: Does the customer use Internet banking facilities? 1 = Yes; 0 = No  
+
+**Credit.Card**: Does the customer use a credit card issued by Universal Bank? 1 = Yes; 0 = No  
+
+##Data File Prep  
+
+We will drop the ID and Zip.Code columns and also recode Education variable into a factor variable.
+ 
+```{r data prep}
+bank.df <- read.csv("UniversalBank.csv")
+bank.df <- bank.df[,-c(1,5)] # drop ID and zip code columns.  
+# create categorical variable for education
+bank.df$Education <- factor(bank.df$Education, levels = c(1,2,3), labels = c("Undergrad", "Graduate", "Advanced/Professional"))
+```
+
+## Logistic Regression Model
+```{r logit}
+logit.reg <- glm(bank.df$Personal.Loan ~., data = bank.df, family = "binomial")
+options(scipen=999)
+summary(logit.reg)
+```
+
+## Part A Question 2
+
+```{r predicting customer}
+new.customer <- data.frame(38, 17, 150, 1, 0.2, "Graduate", 0, 0,0,0, 1, 1) #data for new customer in the question
+colnames(new.customer) <- c("Age", "Experience", "Income", "Family", "CCAvg", "Education", "Mortgage", "Personal.Loan", "Securities.Account", "CD.Account", "Online", "CreditCard") #duplicating the column names in the main dataset
+A2_customer_prediction <- predict(logit.reg, newdata = new.customer) #predicts the logit for the new customer per the model
+A2_customer_prediction_odds <- data.frame(exp(A2_customer_prediction)) # converts logit to odds
+A2_customer_prediction_probability = data.frame(A2_customer_prediction_odds/(1+A2_customer_prediction_odds)) # converts odds to probability
+print(A2_customer_prediction_probability)
+```
+
+## Part B
+
+For Part B, I'll add the new customer to the data set (customer 5001)
+
+```{r}
+bank.df <- rbind(bank.df, new.customer)
+```
+## KNN Model
+
+First, convert to dummy variables and create a normalized version of the bank data.  Then, create training and test sets from this normalized version using an 80/20 split.
+
+```{r}
+
+dummy.bank.df <- dummy.data.frame(bank.df, sep = ":") # creates dummy variable since 'Education' is in words
+normalize <- function(x) {return ((x-min(x))/(max(x)-min(x)))} # normalize function
+bank.normalized <- as.data.frame(lapply(dummy.bank.df[-10],normalize)) # normalizes all variables to be from 0 to 1 so they have the same scale, and deletes Personal.Loan (since that's what we're trying to predict)
+bank.normalized.train <- bank.normalized[1:4000,] # creates training set
+bank.normalized.test <- bank.normalized[4001:5000,] # creates test set
+
+knn_model <- knn(train = bank.normalized.train, test = bank.normalized.test, cl = dummy.bank.df$Personal.Loan[1:4000], k=1) # creates KNN model, k=1 per discussion below
+knn_model_confusion_matrix <- table(knn_model,dummy.bank.df[4001:5000,10]) # calculates confusion matrix (predictions versus actual for each customer in the test set)
+print(knn_model_confusion_matrix)
+
+new.customer.prediction.knn <- knn(train = bank.normalized.train, test = bank.normalized[5001,], cl = dummy.bank.df$Personal.Loan[1:4000], k=1) # model to predict new customer
+new.customer.confusion.matrix.knn <- table(new.customer.prediction.knn,dummy.bank.df[5001,10]) # calculates confusion matrix (prediction versus actual for new customer)
+print(new.customer.confusion.matrix.knn)
+```
+
+I ran several values of k to see which is the best fit.  Results:
+```
+k = 100
+
+knn_model   0   1
+        0 917  82
+        1   0   1
+
+k=63 (square of 4000)
+
+knn_model   0   1
+        0 917  79
+        1   0   4
+
+K=20
+
+knn_model   0   1
+        0 913  54
+        1   4  29
+
+K=10
+
+knn_model   0   1
+        0 915  45
+        1   2  38
+
+K = 5
+
+knn_model   0   1
+        0 915  37
+        1   2  46
+
+K = 4
+
+knn_model   0   1
+        0 913  34
+        1   4  49
+
+K = 3
+
+knn_model   0   1
+        0 913  29
+        1   4  54
+
+K = 2
+
+knn_model   0   1
+        0 905  29
+        1  12  54
+
+
+K = 1
+
+knn_model   0   1
+        0 907  23
+        1  10  60
+```
+
+High values of k produce lots of false negatives, which is a bad result for the bank -- it's the equivalent of a loan not offered where one would have been taken.  K values of 1 and 3 are tied for best results (33 out of 1000 incorrect predictions), but k=1 had less false negatives than k=3.        
+
+## Naive Bayes Model
+
+```{r}
+
+bank.nb <- bank.df
+cols <- c(8,9,10,11,12)
+bank.nb[cols] <- lapply(bank.nb[cols], factor) #makes these columns categorical variables
+bank.train.nb <- bank.nb[1:4000,] # creates training set
+bank.test.nb <- bank.nb[4001:5000,] # creates test set
+Personal.Loan.Classifier.nb <- naiveBayes(Personal.Loan ~ ., data = bank.train.nb) # creates the Naive Bayes model
+Prediction.nb <- predict(Personal.Loan.Classifier.nb, bank.test.nb) # predicts
+Table.nb <- table(Prediction.nb,bank.test.nb$Personal.Loan) # creates a table to see results
+print(Table.nb) 
+
+new.customer.prediction.nb <- predict(Personal.Loan.Classifier.nb, bank.nb[5001,]) #predicts new customer
+new.customer.Table.nb <- table(new.customer.prediction.nb,bank.nb[5001,10]) # creates a table to see results
+print(new.customer.Table.nb) 
+
+```
+
+
+## Decision Tree Model
+
+```{r}
+bank.dt <- bank.df
+cols.dt <- c(8,9,10,11,12)
+bank.dt[cols.dt] <- lapply(bank.dt[cols.dt], factor) #makes these categorical variables  
+bank.train.dt <- bank.dt[1:4000,] #creates training set
+bank.test.dt <- bank.dt[4001:5000,] #creates test set
+
+set.seed(500) #standardizes starting point
+bank.rpart <- rpart(Personal.Loan ~ ., data=bank.train.dt, method="class", parms=list(split="information"),                                  control=rpart.control(minsplit = 1)) # decision tree model
+rpart.plot(bank.rpart, type=0, extra=101) # plots the decision tree on training set
+
+prediction.dt <- predict(bank.rpart, bank.test.dt, type = "class") #predicts test set versus the model
+table.dt <- table(prediction.dt, bank.test.dt$Personal.Loan) #confusion matrix of results
+print(table.dt)
+
+new.customer.prediction.dt <- predict(bank.rpart, bank.dt[5001,], type = "class") #predicts new customer versus the model
+new.customer.table.dt <- table(new.customer.prediction.dt, bank.dt[5001,10]) #confusion matrix of results
+print(new.customer.table.dt)
+```
